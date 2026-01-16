@@ -198,4 +198,3 @@ smart-assistant-park/
 - Frontend uses TypeScript for type safety
 - Backend uses Pydantic for request/response validation
 - Map-based UI with location services integration
-
