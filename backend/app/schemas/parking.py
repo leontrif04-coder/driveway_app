@@ -1,11 +1,13 @@
 # backend/app/schemas/parking.py
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 from typing import Optional, Literal
 from datetime import datetime
 
 MeterStatus = Literal["working", "broken", "unknown"]
 
 class ParkingSpot(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    
     id: str
     latitude: float
     longitude: float
@@ -30,9 +32,6 @@ class ParkingSpot(BaseModel):
     # Real-time availability fields
     is_occupied: bool = False
     estimated_availability_time: Optional[datetime] = None  # When occupied spot will be available
-
-    class Config:
-        orm_mode = True
 
 class ParkingSpotCreate(BaseModel):
     latitude: float

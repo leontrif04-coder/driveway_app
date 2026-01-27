@@ -1,16 +1,15 @@
 # backend/app/schemas/review.py
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 from datetime import datetime
 
 class Review(BaseModel):
-  id: str
-  spot_id: str
-  rating: int
-  text: str
-  created_at: datetime
-
-  class Config:
-    orm_mode = True
+    model_config = ConfigDict(from_attributes=True)
+    
+    id: str
+    spot_id: str
+    rating: int
+    text: str
+    created_at: datetime
 
 class ReviewCreate(BaseModel):
   rating: int

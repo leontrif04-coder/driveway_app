@@ -1,20 +1,21 @@
 # backend/app/routers/spots.py
-from fastapi import APIRouter, Query, Path, HTTPException
-from typing import List, Optional
+from fastapi import APIRouter, Query, Path, HTTPException, Depends
+from typing import List
+from uuid import UUID
+from sqlalchemy.orm import Session
 from app.schemas.parking import ParkingSpot, ParkingSpotCreate
-from app.services import scoring, geo
-from app.services.scoring import compute_spot_score
-from app.storage import get_all_spots, get_spot, create_spot
-from datetime import datetime
-import uuid
+from app.database.config import get_db
+from app.database.sync_repositories import RepositoryFactory, ParkingSpotRepository
+from app.database.mappers import db_spot_to_schema, schema_spot_to_db
 
 router = APIRouter()
 
-def _add_score_to_spot(spot: ParkingSpot) -> ParkingSpot:
-    """Add computed score to a spot."""
-    spot_dict = spot.dict()
-    spot_dict["score"] = compute_spot_score(spot.id)
-    return ParkingSpot(**spot_dict)
+
+def get_spot_repository(db: Session = Depends(get_db)) -> ParkingSpotRepository:
+    """Dependency to get parking spot repository."""
+    factory = RepositoryFactory(db)
+    return factory.parking_spots
+
 
 @router.get("/", response_model=List[ParkingSpot])
 async def list_spots(
@@ -22,58 +23,60 @@ async def list_spots(
     lng: float = Query(..., description="Longitude of center point"),
     radius_m: float = Query(1000, description="Radius in meters"),
     limit: int = Query(50, description="Maximum number of spots to return"),
+    repo: ParkingSpotRepository = Depends(get_spot_repository),
 ):
     """
     Get parking spots near a point.
     Returns spots within radius_m meters of (lat, lng), limited to 'limit' results.
+    Uses PostGIS for efficient geospatial queries.
     """
-    from app.services.geo import haversine_distance_m
+    # Query spots within radius using PostGIS
+    db_spots_with_distance = repo.find_within_radius(
+        latitude=lat,
+        longitude=lng,
+        radius_meters=radius_m,
+        limit=limit
+    )
     
-    all_spots = get_all_spots()
-    center = (lat, lng)
+    # Convert database models to Pydantic schemas with distance
+    spots = []
+    for db_spot, distance_m in db_spots_with_distance:
+        spot_schema = db_spot_to_schema(db_spot, distance_m=distance_m)
+        spots.append(spot_schema)
     
-    # Filter spots within radius and compute distances
-    nearby_spots = []
-    for spot in all_spots:
-        distance = haversine_distance_m(center, (spot.latitude, spot.longitude))
-        if distance <= radius_m:
-            spot_dict = spot.dict()
-            spot_dict["distance_to_user_m"] = distance
-            spot_with_distance = ParkingSpot(**spot_dict)
-            # Add computed score
-            nearby_spots.append(_add_score_to_spot(spot_with_distance))
-    
-    # Sort by distance and limit
-    nearby_spots.sort(key=lambda s: s.distance_to_user_m or float('inf'))
-    return nearby_spots[:limit]
+    return spots
+
 
 @router.get("/{spot_id}", response_model=ParkingSpot)
-async def get_spot_by_id(spot_id: str = Path(...)):
+async def get_spot_by_id(
+    spot_id: str = Path(...),
+    repo: ParkingSpotRepository = Depends(get_spot_repository),
+):
     """Get a specific parking spot by ID."""
-    spot = get_spot(spot_id)
-    if not spot:
+    try:
+        spot_uuid = UUID(spot_id)
+    except ValueError:
+        raise HTTPException(status_code=404, detail="Invalid spot ID format")
+    
+    db_spot = repo.get_by_id(spot_uuid)
+    if not db_spot:
         raise HTTPException(status_code=404, detail="Spot not found")
-    return _add_score_to_spot(spot)
+    
+    return db_spot_to_schema(db_spot)
+
 
 @router.post("/", response_model=ParkingSpot)
-async def create_spot_endpoint(spot_data: ParkingSpotCreate):
+async def create_spot_endpoint(
+    spot_data: ParkingSpotCreate,
+    repo: ParkingSpotRepository = Depends(get_spot_repository),
+):
     """Create a new parking spot (for dev/testing)."""
-    spot_id = f"spot-{uuid.uuid4().hex[:8]}"
-    spot = ParkingSpot(
-        id=spot_id,
-        latitude=spot_data.latitude,
-        longitude=spot_data.longitude,
-        street_name=spot_data.street_name,
-        max_duration_minutes=spot_data.max_duration_minutes,
-        price_per_hour_usd=spot_data.price_per_hour_usd,
-        safety_score=spot_data.safety_score,
-        tourism_density=spot_data.tourism_density,
-        meter_status=spot_data.meter_status,
-        meter_status_confidence=spot_data.meter_status_confidence,
-        review_count=0,
-        last_updated_at=datetime.utcnow(),
-    )
-    created_spot = create_spot(spot)
-    return _add_score_to_spot(created_spot)
-
-
+    # Convert schema to database model
+    db_spot = schema_spot_to_db(spot_data)
+    
+    # Create in database
+    created_spot = repo.create(db_spot)
+    repo.session.commit()
+    
+    # Convert back to schema
+    return db_spot_to_schema(created_spot)

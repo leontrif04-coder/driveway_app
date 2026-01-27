@@ -2,35 +2,40 @@
 import pytest
 from typing import List
 from datetime import datetime
+from uuid import UUID
+from sqlalchemy.orm import Session
 from app.schemas.parking import ParkingSpot
 from app.schemas.review import Review
-from app.storage import (
-    _spots,
-    _reviews,
-    get_all_spots,
-    get_spot,
-    create_spot,
-    update_spot,
-    get_reviews,
-    add_review,
-)
+from app.database.config import create_test_engine, TestingSessionManager
+from app.database.models import Base, ParkingSpot as ParkingSpotModel, Review as ReviewModel
+from app.database.sync_repositories import RepositoryFactory
+from app.database.mappers import db_spot_to_schema, db_review_to_schema
 
 
-@pytest.fixture(autouse=True)
-def reset_storage():
-    """Reset storage before and after each test."""
-    _spots.clear()
-    _reviews.clear()
-    yield
-    _spots.clear()
-    _reviews.clear()
+@pytest.fixture(scope="session")
+def test_engine():
+    """Create test database engine."""
+    engine = create_test_engine()
+    Base.metadata.create_all(engine)
+    yield engine
+    Base.metadata.drop_all(engine)
+    engine.dispose()
+
+
+@pytest.fixture
+def db_session(test_engine):
+    """Provide transactional test session."""
+    with TestingSessionManager(seed_data=False) as session:
+        yield session
+        # Rollback any uncommitted changes
+        session.rollback()
 
 
 @pytest.fixture
 def sample_spot() -> ParkingSpot:
     """Create a sample parking spot for testing."""
     return ParkingSpot(
-        id="spot-test-1",
+        id="550e8400-e29b-41d4-a716-446655440001",
         latitude=40.7128,
         longitude=-74.0060,
         street_name="Test Street",
@@ -49,7 +54,7 @@ def sample_spot() -> ParkingSpot:
 def sample_spot_2() -> ParkingSpot:
     """Create a second sample parking spot for testing."""
     return ParkingSpot(
-        id="spot-test-2",
+        id="550e8400-e29b-41d4-a716-446655440002",
         latitude=40.7138,
         longitude=-74.0030,
         street_name="Test Avenue",
@@ -89,22 +94,40 @@ def london_location() -> tuple[float, float]:
 
 
 @pytest.fixture
-def populated_storage(sample_spot: ParkingSpot, sample_spot_2: ParkingSpot) -> List[ParkingSpot]:
-    """Populate storage with test spots."""
-    create_spot(sample_spot)
-    create_spot(sample_spot_2)
+def populated_db(db_session: Session, sample_spot: ParkingSpot, sample_spot_2: ParkingSpot):
+    """Populate database with test spots."""
+    from app.database.mappers import schema_spot_to_db
+    from app.database.sync_repositories import RepositoryFactory
+    
+    factory = RepositoryFactory(db_session)
+    spot_repo = factory.parking_spots
+    
+    # Convert schemas to DB models and create
+    db_spot1 = schema_spot_to_db(sample_spot, UUID(sample_spot.id))
+    db_spot2 = schema_spot_to_db(sample_spot_2, UUID(sample_spot_2.id))
+    
+    spot_repo.create(db_spot1)
+    spot_repo.create(db_spot2)
+    db_session.commit()
+    
     return [sample_spot, sample_spot_2]
 
 
 @pytest.fixture
-def client():
-    """Create a test client for FastAPI."""
+def client(db_session):
+    """Create a test client for FastAPI with database."""
     from fastapi.testclient import TestClient
     from main import app
+    from app.database.config import get_db
     
-    # Clear storage before creating client
-    _spots.clear()
-    _reviews.clear()
+    # Override get_db dependency to use test session
+    def override_get_db():
+        yield db_session
     
-    return TestClient(app)
-
+    app.dependency_overrides[get_db] = override_get_db
+    
+    try:
+        yield TestClient(app)
+    finally:
+        # Clean up dependency override
+        app.dependency_overrides.clear()

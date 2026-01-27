@@ -1,11 +1,24 @@
 # backend/main.py
+from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from app.routers import spots, reviews, occupancy, recommendations
 from app.routers.websocket import websocket_endpoint
-from app.storage import seed_data
+from app.database.config import lifespan_db_manager
 
-app = FastAPI(title="Smart Parking API", version="0.1.0")
+# Use lifespan context manager for database initialization
+@asynccontextmanager
+async def lifespan(app):
+    """Application lifespan manager combining database and other startup tasks."""
+    async with lifespan_db_manager(app):
+        # Additional startup tasks can go here
+        yield
+
+app = FastAPI(
+    title="Smart Parking API",
+    version="0.1.0",
+    lifespan=lifespan
+)
 
 origins = ["*"]  # tighten in production
 
@@ -25,9 +38,7 @@ app.include_router(recommendations.router, prefix="/api/v1/recommendations", tag
 # WebSocket endpoint (registered directly, not via router)
 app.websocket("/api/v1/ws")(websocket_endpoint)
 
-@app.on_event("startup")
-async def startup_event():
-    """Seed fake data on startup."""
-    seed_data()
+# Note: Database initialization and migrations are handled by lifespan_db_manager
+# Seed data is now in the database migrations (002_seed_data.sql)
 
 
